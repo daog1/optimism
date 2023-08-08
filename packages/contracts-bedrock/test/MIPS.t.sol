@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
-import { Test } from "forge-std/Test.sol";
+import { CommonTest } from "./CommonTest.t.sol";
 import { MIPS } from "src/cannon/MIPS.sol";
 import { PreimageOracle } from "src/cannon/PreimageOracle.sol";
+import { console2 as console } from "forge-std/console2.sol";
 
-contract MIPS_Test is Test {
+contract MIPS_Test is CommonTest {
     MIPS internal mips;
     PreimageOracle internal oracle;
 
-    function setUp() public {
+    function setUp() public virtual override {
+        super.setUp();
         oracle = new PreimageOracle();
         mips = new MIPS();
         vm.store(address(mips), 0x0, bytes32(abi.encode(address(oracle))));
@@ -40,6 +42,87 @@ contract MIPS_Test is Test {
         assertTrue(postState != bytes32(0));
     }
 
+    function test_add_succeeds() external {
+        uint32 pc = 0x0;
+        uint32 insn = 0x2324020; // add t0, s1, s2
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn);
+
+        uint8 t0_reg = 8;
+        uint16 s1 = 4;
+        uint16 s2 = 9;
+        uint32[32] memory registers;
+        registers[t0_reg] = 1;
+        registers[17] = s1;
+        registers[18] = s2;
+
+        MIPS.State memory state = MIPS.State({
+            memRoot: memRoot,
+            preimageKey: bytes32(0),
+            preimageOffset: 0,
+            pc: 0,
+            nextPC: 4,
+            lo: 0,
+            hi: 0,
+            heap: 0,
+            exitCode: 0,
+            exited: false,
+            step: 1,
+            registers: registers
+        });
+        bytes memory encodedState = encodeState(state);
+
+        MIPS.State memory expect = state;
+        expect.pc = state.nextPC;
+        expect.nextPC += 4;
+        expect.step += 1;
+        expect.registers[t0_reg] = s1 + s2;
+
+        bytes32 postState = mips.step(encodedState, proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
+    function test_preimage_write_succeeds() external {
+        uint32 pc = 0x0;
+        uint32 insn = 0x0000000c; // syscall
+        uint32 a1 = 0x4;
+        uint32 a1_val = 0x0000abba;
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn, a1, a1_val);
+
+        uint32[32] memory registers;
+        registers[2] = 4004; // syscall_no
+        registers[4] = 6; // fd
+        registers[5] = a1; // addr
+        registers[6] = 4; // count
+
+        MIPS.State memory state = MIPS.State({
+            memRoot: memRoot,
+            preimageKey: bytes32(0),
+            preimageOffset: 1,
+            pc: 0,
+            nextPC: 4,
+            lo: 0,
+            hi: 0,
+            heap: 0,
+            exitCode: 0,
+            exited: false,
+            step: 1,
+            registers: registers
+        });
+        bytes memory encodedState = encodeState(state);
+
+        MIPS.State memory expect = state;
+        expect.preimageOffset = 0; // preimage write resets offset
+        expect.pc = state.nextPC;
+        expect.nextPC += 4;
+        expect.step += 1;
+        expect.preimageKey = bytes32(uint256(0xabba));
+        expect.registers[2] = 4; // return
+        expect.registers[7] = 0; // errno
+
+        bytes32 postState = mips.step(encodedState, proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
     function encodeState(MIPS.State memory state) internal pure returns (bytes memory) {
         bytes memory registers;
         for (uint i = 0; i < state.registers.length; i++) {
@@ -59,5 +142,12 @@ contract MIPS_Test is Test {
             state.step,
             registers
         );
+    }
+
+    function outputState(MIPS.State memory state) internal pure returns (bytes32 out_) {
+        bytes memory enc = encodeState(state);
+        assembly {
+            out_ := keccak256(add(enc, 0x20), 226)
+        }
     }
 }
