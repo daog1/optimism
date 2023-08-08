@@ -81,6 +81,98 @@ contract MIPS_Test is CommonTest {
         assertTrue(postState == outputState(expect), "unexpected post state");
     }
 
+    function test_jump_succeeds() external {
+        uint32 pc = 0x0;
+        uint16 label = 0x2;
+        uint32 insn = uint32(0x08_00_00_00) | label; // j label
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn);
+
+        MIPS.State memory state;
+        state.pc = 0;
+        state.nextPC = 4;
+        state.memRoot = memRoot;
+
+        MIPS.State memory expect;
+        expect.memRoot = state.memRoot;
+        expect.pc = state.nextPC;
+        expect.nextPC = label << 2;
+        expect.step = state.step + 1;
+
+        bytes32 postState = mips.step(encodeState(state), proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
+    function test_jal_succeeds() external {
+        uint32 pc = 0x0;
+        uint16 label = 0x2;
+        uint32 insn = uint32(0x0c_00_00_00) | label; // jal label
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn);
+
+        MIPS.State memory state;
+        state.pc = 0;
+        state.nextPC = 4;
+        state.memRoot = memRoot;
+
+        MIPS.State memory expect;
+        expect.memRoot = state.memRoot;
+        expect.pc = state.nextPC;
+        expect.nextPC = label << 2;
+        expect.step = state.step + 1;
+        expect.registers[31] = state.pc + 8;
+
+        bytes32 postState = mips.step(encodeState(state), proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
+    function test_preimage_read_succeeds() external {
+        uint32 pc = 0x0;
+        uint32 insn = 0x0000000c; // syscall
+        uint32 a1 = 0x4;
+        uint32 a1_val = 0x0000abba;
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn, a1, a1_val);
+
+        uint32[32] memory registers;
+        registers[2] = 4003; // read syscall
+        registers[4] = 5; // fd
+        registers[5] = a1; // addr
+        registers[6] = 4; // count
+
+        MIPS.State memory state = MIPS.State({
+            memRoot: memRoot,
+            preimageKey: bytes32(uint256(1) << 248 | 0x01),
+            preimageOffset: 8, // start reading past the pre-image length prefix
+            pc: pc,
+            nextPC: pc + 4,
+            lo: 0,
+            hi: 0,
+            heap: 0,
+            exitCode: 0,
+            exited: false,
+            step: 1,
+            registers: registers
+        });
+        bytes memory encodedState = encodeState(state);
+
+        // prime the pre-image oracle
+        bytes32 word = bytes32(uint256(0xdeadbeef) << 224);
+        uint8 size = 4;
+        uint8 partOffset = 8;
+        oracle.loadLocalData(uint256(state.preimageKey), word, size, partOffset);
+
+        MIPS.State memory expect = state;
+        expect.preimageOffset += 4;
+        expect.pc = state.nextPC;
+        expect.nextPC += 4;
+        expect.step += 1;
+        expect.registers[2] = 4; // return
+        expect.registers[7] = 0; // errno
+        // recompute merkle root of written pre-image
+        (expect.memRoot,) = ffi.getCannonMemoryProof(pc, insn, a1, 0xdeadbeef);
+
+        bytes32 postState = mips.step(encodedState, proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
     function test_preimage_write_succeeds() external {
         uint32 pc = 0x0;
         uint32 insn = 0x0000000c; // syscall
@@ -89,7 +181,7 @@ contract MIPS_Test is CommonTest {
         (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(pc, insn, a1, a1_val);
 
         uint32[32] memory registers;
-        registers[2] = 4004; // syscall_no
+        registers[2] = 4004; // write syscall
         registers[4] = 6; // fd
         registers[5] = a1; // addr
         registers[6] = 4; // count
@@ -98,7 +190,7 @@ contract MIPS_Test is CommonTest {
             memRoot: memRoot,
             preimageKey: bytes32(0),
             preimageOffset: 1,
-            pc: 0,
+            pc: pc,
             nextPC: 4,
             lo: 0,
             hi: 0,
@@ -121,6 +213,44 @@ contract MIPS_Test is CommonTest {
 
         bytes32 postState = mips.step(encodedState, proof);
         assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
+    function test_mmap_succeeds() external {
+        uint32 insn = 0x0000000c; // syscall
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(0, insn);
+
+        MIPS.State memory state;
+        state.memRoot = memRoot;
+        state.nextPC = 4;
+        state.registers[2] = 4090; // mmap syscall
+        state.registers[4] = 0x0; // a0
+        state.registers[5] = 4095; // a1
+        bytes memory encodedState = encodeState(state);
+
+        MIPS.State memory expect = state;
+        // assert page allocation is aligned to 4k
+        expect.step += 1;
+        expect.pc = state.nextPC;
+        expect.nextPC += 4;
+        expect.heap += 4096;
+        expect.registers[2] = 0; // return old heap
+
+        bytes32 postState = mips.step(encodedState, proof);
+        assertTrue(postState == outputState(expect), "unexpected post state");
+    }
+
+    function test_illegal_instruction_fails() external {
+        uint32 illegal_insn = 0xFF_FF_FF_FF;
+        // the illegal instruction is partially decoded as containing a memory operand
+        // so we stuff random data to the expected address
+        uint32 addr = 0xFF_FF_FF_FC; // 4-byte aligned ff..ff
+        (bytes32 memRoot, bytes memory proof) = ffi.getCannonMemoryProof(0, illegal_insn, addr, 0);
+
+        MIPS.State memory state;
+        state.memRoot = memRoot;
+        bytes memory encodedState = encodeState(state);
+        vm.expectRevert("invalid instruction");
+        mips.step(encodedState, proof);
     }
 
     function encodeState(MIPS.State memory state) internal pure returns (bytes memory) {

@@ -335,20 +335,16 @@ func main() {
 		checkErr(err, "Error decocding insn")
 		mem.SetMemory(uint32(pc), uint32(insn))
 
-		insnProof := mem.MerkleProof(uint32(pc))
-		var memProof [896]byte
-
+		var insnProof, memProof [896]byte
 		if len(args) == 5 {
 			memAddr, err := strconv.ParseUint(args[3], 10, 32)
 			checkErr(err, "Error decocding memAddr")
 			memValue, err := strconv.ParseUint(args[4], 10, 32)
 			checkErr(err, "Error decocding memValue")
 			mem.SetMemory(uint32(memAddr), uint32(memValue))
-
-			// rebuild proof including memAddr
-			insnProof = mem.MerkleProof(uint32(pc))
 			memProof = mem.MerkleProof(uint32(memAddr))
 		}
+		insnProof = mem.MerkleProof(uint32(pc))
 
 		output := struct {
 			MemRoot common.Hash
