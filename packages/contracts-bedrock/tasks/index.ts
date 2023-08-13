@@ -1,5 +1,6 @@
 import './deposits'
 import './rekey'
+import './rekeyjs'
 import './check-op-node'
 import './watch'
 import './forge-verify'
